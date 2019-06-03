@@ -1,0 +1,340 @@
+---
+title: "Choose Your Own Project - BlackFriday"
+author: "Michael Strenge"
+date: "03 6 2019"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+```{r include = FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning = FALSE, message = FALSE)
+```
+
+# 1. Introduction
+The purpose of this project is to develop a predictive model to forecast the costumer purchase on Black Friday for a particular retail store. The database used for this project is the Black Friday data set provided by Kaggle (https://www.kaggle.com/mehdidag/black-friday), which represents a sample of more than 500,000 transactions made in a store. Since the store wants to know better the customer purchase behavior, the regression problem here is to find an algorithm that determines the dependent variable (the amount of purchase) with the help of customer related information such as age, gender, occupation (profession), marital status and city category (place of residence).A short description of the variables can be found on Kaggle as well.
+
+This project constructs a model that identifies the drivers of costumer purchase and compares the performance of a class of machine learning techniques. In machine learning, a common task is the study and construction of algorithms that can learn from and make predictions on data. Such algorithms work by making data-driven predictions through building a model from input data. The model is first fit on a training dataset that is a set of examples used to fit the parameters of the model. In the next step, the fitted model is used to predict the responses for the observations in a second dataset called the validation dataset. This project trains an algorithm using multiple machine learning techniques and the customer related input mentioned above in one subset to predict the amount of purchase in the validation set. The residual mean squared error (RMSE) is used to evaluate how close predictions are to the true values in the validation set.
+
+The report is structured according the performed key project steps and therefore proceeds as follows: In the next section, the methods and analysis procedures will be described by highlighting the data preparation, exploration and visualization techniques and outcomes. Based on these insights, the modelling approach is described and explained. The presentation and discussion of the modelling results (incl. RMSEs) follow. The report concludes with general learnings, outlines the limitations of the applied and tested approach, and provides directions for future modelling endeavors.
+
+
+# 2. Methods & Analysis
+## 2.1 Data Preparation
+After the corresponding dataset has been loaded, the first step is to get a better understanding of the original database.
+
+```{r echo = TRUE, message = FALSE}
+library(tidyverse)
+library(caret)
+library(caretEnsemble)
+library(plyr)
+library(MASS)
+library(Hmisc)
+library(gclus)
+library(glmnet)
+
+# Load data set BlackFriday from my GitHub account
+df <- read.csv("https://raw.githubusercontent.com/mistrenge/BlackFriday/master/BlackFriday.csv")
+
+# Explore original dataset
+head(df[1:7])
+head(df[8:12])
+str(df)
+```
+
+The original Blackfriday dataset consists of 537,577 observations and contains 12 variables with different formats. Since no detailed description of the author on Kaggle is available for the product-related data, the variables Product_Category 1, 2 and 3 as well as the Product_ID  are not taken into account for further analysis. For example, no details are given in terms of the quantity or price per product or detailed information on the three product categories and their relationship to each other. In addition, the further analytic approach intends to form the sum of the purchase per customer because the project wants to examine how much each customer purchases in total and not how much she or he spends on each product. However, the aggregation of the multiple customer data forms a row per customer, making the later analysis of User_ID in the machine learning model irrelevant as well (see section Results).
+
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+# Select variables for further analysis
+df <- df %>%
+  dplyr::select(User_ID, Gender, Age, Occupation, City_Category, Stay_In_Current_City_Years, Marital_Status, Purchase)
+
+# Transform format of variables to better manipulate data in next step
+df <- within(df, {
+  Occupation <- as.factor(Occupation)
+  Marital_Status <- as.factor(Marital_Status)
+})
+
+# Summarize data set to calculate summary purchase for each customer
+df <- df %>% group_by(User_ID) %>%
+  summarise_each(funs(if(is.numeric(.)) sum(., na.rm = TRUE) else first(.)))
+```
+
+As the dataset shows, the variables are either integers or factors. Basically, machine learning techniques can be performed better on the basis of numerical data. Therefore, in the next step, the variables are transformed into a numeric format. 
+
+```{r echo = TRUE, message = FALSE}
+# Explore original dataset
+# Transform data to numeric variables
+revalue(df$Gender, c("F" = 1, "M" = 0)) -> df$Gender
+revalue(df$Age, c("0-17" = 0, "18-25" = 1, "26-35" = 2, "36-45"= 3, "46-50" = 4, "51-55" = 5, "55+" = 6)) -> df$Age
+revalue(df$City_Category, c("C" = 0, "B" = 1, "A" = 2)) -> df$City_Category
+revalue(df$Stay_In_Current_City_Years, c("0" = 0, "1" = 1, "2" = 2, "3"= 3, "4+" = 4)) -> df$Stay_In_Current_City_Years
+
+df <- within(df, {
+  Gender <- as.numeric(as.character(Gender))
+  Age <- as.numeric(as.character(Age))
+  City_Category <- as.numeric(as.character(City_Category))
+  Stay_In_Current_City_Years <- as.numeric(as.character(Stay_In_Current_City_Years))
+  Marital_Status <- as.numeric(as.character(Marital_Status))
+  Occupation <- as.numeric(as.character(Occupation))
+  Purchase <- as.numeric(as.character(Purchase))
+})
+```
+
+An excerpt of the dataset after preparation is shown in the following tables.
+
+```{r echo = TRUE, message = FALSE}
+# Check dataset
+head(df)
+str(df)
+```
+
+However, before proceeding with the description of the data exploration approach, the missing values are analyzed. Overall, no missing values could be identified in the dataset.
+
+```{r echo = TRUE, message = FALSE}
+# Identify missing values
+sum(is.na(df))
+```
+
+## 2.2 Data Exploration
+The data exploration starts by analyzing the dataset in generel and the dependent variable purchase per costumer in detail, in order to get a better understanding of the distribution of the data. 
+
+```{r echo = TRUE, message = FALSE}
+# Explore data set and create histogram for purchase variable
+summary(df)
+df %>% group_by(User_ID) %>% ggplot(aes(Purchase)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Purchase per User")
+```
+
+The histogram indicates that the distribution is skewed, suggesting to log transform this variable. If the data follows a log normal distribution or approximately so, then the log transformed data follows a normal or near normal distribution. In this case, the log transformation does remove or reduce skewness and simplify further analytic procedures. 
+
+```{r echo = TRUE, message = FALSE}
+# Log transform Purchase variable
+df <- df %>% mutate(Purchase = log(Purchase))
+```
+
+In order to gain initial insights into which independent variables determine the purchasing behavior of customers, the project calculates and illustrates the correlations between the variables using the Hmisc and gclus R packages. The results show that, in particular, there is a connection between the purchasing behavior of the customer and the variables Gender, Age, and City_Category.
+
+```{r echo = TRUE, message = FALSE}
+# Show correlations between variables in training set
+cor <-rcorr(as.matrix(df[2:8]))
+cor
+
+# Create scatter plot matrix to show correlations between variables in training set
+dta <- df[c(2:8)] # get data 
+dta.r <- abs(cor(dta)) # get correlations
+dta.col <- dmat.color(dta.r) # get colors
+
+# Reorder variables so those with highest correlation are closest to the diagonal
+dta.o <- order.single(dta.r) 
+cpairs(dta, dta.o, panel.colors=dta.col, gap=.5,
+  main="Variables Ordered and Colored by Correlation")
+```
+
+## 2.3 Modeling Approach
+As already mentioned, the project uses the RMSE to evaluate how close predictions are to the true values in the validation set. The projects defines $y$ as the observed purchase per costumer and denote the prediction with $\hat{y}$. Thus, the RMSE is defined as:
+$$RMSE = \sqrt{\frac{1}{N}\sum(\hat{y} - y)^2}$$
+with $N$ being the sample size. The RMSE can be interpret similarly to a standard deviation. 
+
+The project uses a two-step procedure to construct the algorithm and compare the performance of the different techniques based on the RMSE results. 
+
+**Step 1: Analysis of the entire set of independent variables**
+
+The first model trains the algorithm on the training set and validates the results on the test set, using all independent variables (Gender, Age, Occupation, City_Category, Stay_In_Current_City_Years, Marital_Status). Please note that the calculation is only based on seven different common used machine learning techniques for regression models because of computational power issues. Furthermore, two ensemble models are calculated based on linear combination and stack method (glmnet). The modeling approach uses the R packages caret, caretEnsemble and glmnet. The glmnet package provides extremely efficient procedures for fitting the entire lasso or elastic-net regularization path for linear regression, logistic and multinomial regression models, Poisson regression and the Cox model. The projects controls also for cross-validation and correlation of the ensemble models and resamples the model results. Resampling is a series of methods used to reconstruct the sample data sets, including training and validation sets. It can provide more "useful" different sample sets for learning process in some way.
+
+**Step 2: Analysis of a selected set of independent variables**
+
+Before proceeding with the model approach, the project uses a step-wise-regression to reduce the independent variables. Stepwise regression is a modification of the forward selection so that after each step in which a variable was added, all candidate variables in the model are checked to see if their significance has been reduced below the specified tolerance level. If a nonsignificant variable is found, it is removed from the model. Nisbet et al. (2018) suggest that this procedure is a common practice for variable selection, before training a final model with a machine learning algorithm. Based on these results, the second model performs the same steps as the first one, but including only the independent variables that seem to have a significant influence on the dependent variable Purchase. 
+
+# 3. Results
+## 3.1 Step 1: Analysis of the entire set of independent variables
+As described in the previous section, the project proceeds stepwise to construct the models and compares the different approaches based on the RMSE results. First, the data base of the record is plotted in a training and test set, whereby the usual 30% to 70% ratio is used.
+
+```{r echo = TRUE, message = FALSE}
+# Select variables for machine learning model
+df <- df %>%
+  dplyr::select(Gender, Age, Occupation, City_Category, Stay_In_Current_City_Years, Marital_Status, Purchase)
+
+# Split training and test set
+set.seed(1)
+test_index <- createDataPartition(y = df$Purchase, times = 1, p = 0.7, list = FALSE)
+train_set <- df[-test_index,]
+test_set <- df[test_index,]
+```
+
+The next step builds the machine learning algorithm for the training data with all independent variables. 
+
+```{r echo = TRUE, warning = FALSE, message = FALSE, results = "hide"}
+# 1. Model: build machine learning model for training data with all independent variables
+set.seed(222)
+control <- trainControl(method = "cv", number = 5, savePredictions = "final", 
+  allowParallel = TRUE) # Check for cross-validation
+fits <- caretList(Purchase ~ ., trControl = control, methodList = 
+  c("lm", "rpart", "rf", "glm", "gbm", "knn", "svmLinear"), 
+  data = train_set, tuneList = NULL, continue_on_fail = FALSE)
+```
+
+The table below reports the training results of the first modeling approach and the RMSE for each model. Basically, the models seem to perform very similarly, with the Gradient Boosting Machine model ("gbm") having the best RMSE of 0.92.
+
+```{r echo = TRUE, message = FALSE}
+# Print RMSE of each model for training data
+model_results <- data.frame(
+  lm = min(fits$lm$results$RMSE),
+  rpart = min(fits$rpart$results$RMSE),
+  rf = min(fits$rf$results$RMSE),
+  glm = min(fits$glm$results$RMSE),
+  gbm = min(fits$gbm$results$RMSE),
+  knn = min(fits$knn$results$RMSE),
+  svmLinear = min(fits$svmLinear$results$RMSE))
+print(model_results)
+```
+
+The resampling procedure confirms the performance of the multiple models. 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Resample performance of models
+resamples <- resamples(fits)
+dotplot(resamples, metric = "RMSE")
+```
+
+Heareafter, the project calculates the first ensemble model based on the linear combination of multiple models.The ensemble model with a RMSE of 0.92 achieves a comparable value as the Gradient Boosting Machine model.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Create ensemble of models by performing a linear combination
+ensemble_a <- caretEnsemble(fits, metric = "RMSE", trControl = control)
+summary(ensemble_a)
+```
+
+In order to gain insights that are useful for the formation of the second ensemble model (stack approach), the correlation between the individual models is calculated. The correlation between the models generally seems to be very high, so the project propose to use the glmnet method. Also the stack model cannot achieve a significant improvement of the RMSE.
+
+```{r echo = TRUE, message = FALSE}
+# Check correlation of models
+modelCor(resamples)
+
+# Create ensemble of models by using glmnet ("meta model")
+ensemble_b <- caretStack(fits, 
+                         method = "glmnet", 
+                         metric = "RMSE", 
+                         trControl = control)
+print(ensemble_b)
+```
+
+The following table illustrates the results of the tested algorithm based on the validation set. The results show a very similar picture here, the RMSE values of the individual models are very close to each other. Both ensemble models and the Gradient Boosting Machine model provide the best performance.
+
+```{r echo = TRUE, message = FALSE}
+# Validate model on test data
+# Predict on test data
+pred_lm <- predict.train(fits$lm, newdata = test_set)
+pred_rpart <- predict.train(fits$rpart, newdata = test_set)
+pred_rf <- predict.train(fits$rf, newdata = test_set)
+pred_glm <- predict.train(fits$glm, newdata = test_set)
+pred_gbm <- predict.train(fits$gbm, newdata = test_set)
+pred_knn <- predict.train(fits$knn, newdata = test_set)
+pred_svmLinear <- predict.train(fits$svmLinear, newdata = test_set)
+predict_ensa <- predict(ensemble_a, newdata = test_set)
+predict_ensb <- predict(ensemble_b, newdata = test_set)
+
+# Get RMSE for test data
+pred_RMSE <- data.frame(ensemble_a = RMSE(predict_ensa, test_set$Purchase),
+                        ensemble_b = RMSE(predict_ensb, test_set$Purchase),                        
+                        lm = RMSE(pred_lm, test_set$Purchase),
+                        rf = RMSE(pred_rf, test_set$Purchase),
+                        glm = RMSE(pred_glm, test_set$Purchase),
+                        gbm = RMSE(pred_gbm, test_set$Purchase),
+                        knn = RMSE(pred_knn, test_set$Purchase),
+                        svmLinear = RMSE(pred_svmLinear, test_set$Purchase))
+print(pred_RMSE)
+```
+
+## 3.2 Step 2: Analysis of a selected set of independent variables
+As described in the previous section, a stepwise regression is first calculated to select the independent variables that have a significant impact on customer purchasing behavior. The results are generally in line with the correlation analysis and suggest that the model should be limited to the independent variables Age, Gender and City_Category.
+
+```{r echo = TRUE, warning = FALSE, message = FALSE, results = "hide"}
+# Perform stepwise regression to reduce independent variables 
+lm_fit <- lm(Purchase ~ ., data = train_set)
+step <- stepAIC(lm_fit, direction = "both")
+```
+
+```{r echo = TRUE, warning = FALSE}
+# Print results of stepwise regression
+step$anova
+```
+
+The second step performs the same procedure as the first one, but including only the three independent variables Age, Gender and City_Status. However, the performed analyzes show very similar results as in the model with all independent variables. The two ensemble models and the Gradient Boosting Machine model achieve the best performance with a RMSE of 0.92.
+
+```{r echo = TRUE, warning = FALSE, message = FALSE, results = "hide"}
+# 2. Step: Analysis of a selected set of independent variables
+# Build machine learning model for training data with reduced independent variables
+set.seed(222)
+control <- trainControl(method = "cv", number = 5, savePredictions = "final", 
+  allowParallel = TRUE) # Check for cross-validation
+fits_2 <- caretList(Purchase ~ Gender + Age + City_Category, trControl = control, methodList = 
+  c("lm", "rpart", "rf", "glm", "gbm", "knn", "svmLinear"), 
+  data = train_set, tuneList = NULL, continue_on_fail = FALSE)
+```
+
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+# Print RMSE of each model for training data using reduced independent variables
+model_results_2 <- data.frame(
+  lm = min(fits_2$lm$results$RMSE),
+  rpart = min(fits_2$rpart$results$RMSE),
+  rf = min(fits_2$rf$results$RMSE),
+  glm = min(fits_2$glm$results$RMSE),
+  gbm = min(fits_2$gbm$results$RMSE),
+  knn = min(fits_2$knn$results$RMSE),
+  svmLinear = min(fits_2$svmLinear$results$RMSE))
+print(model_results_2)
+
+# Resample performance of new models
+resamples_2 <- resamples(fits_2)
+dotplot(resamples_2, metric = "RMSE")
+
+# Create a new ensemble of models by performing a linear combination
+ensemble_2a <- caretEnsemble(fits_2, metric = "RMSE", trControl = control)
+summary(ensemble_2a)
+
+# Create ensemble of models by using glmnet ("meta model")
+ensemble_2b <- caretStack(fits_2, 
+                         method = "glmnet", 
+                         metric = "RMSE", 
+                         trControl = control)
+print(ensemble_2b)
+
+# Validate reduced model on test data
+# Predict on test data
+pred_lm2 <- predict.train(fits_2$lm, newdata = test_set)
+pred_rpart2 <- predict.train(fits_2$rpart, newdata = test_set)
+pred_rf2 <- predict.train(fits_2$rf, newdata = test_set)
+pred_glm2 <- predict.train(fits_2$glm, newdata = test_set)
+pred_gbm2 <- predict.train(fits_2$gbm, newdata = test_set)
+pred_knn2 <- predict.train(fits_2$knn, newdata = test_set)
+pred_svmLinear2 <- predict.train(fits_2$svmLinear, newdata = test_set)
+predict_ens2a <- predict(ensemble_2a, newdata = test_set)
+predict_ens2b <- predict(ensemble_2b, newdata = test_set)
+
+# Get RMSE for test data
+pred_RMSE_2 <- data.frame(ensemble_2a = RMSE(predict_ens2a, test_set$Purchase),
+                        ensemble_2b = RMSE(predict_ens2b, test_set$Purchase),                        
+                        lm_2 = RMSE(pred_lm2, test_set$Purchase),
+                        rf_2 = RMSE(pred_rf2, test_set$Purchase),
+                        glm_2 = RMSE(pred_glm2, test_set$Purchase),
+                        gbm_2 = RMSE(pred_gbm2, test_set$Purchase),
+                        knn_2 = RMSE(pred_knn2, test_set$Purchase),
+                        svmLinear_2 = RMSE(pred_svmLinear2, test_set$Purchase))
+print(pred_RMSE_2)
+```
+
+# 4. Conclusion
+The objective of this project is to develop a predictive model to forecast the costumer purchase on Black Friday for a particular retail store. A model is constructed that identifies the drivers of costumer purchase and compares the performance of a class of machine learning techniques. For this purpose, a two-step approach is chosen and first a model with all and then a model with selected variables is calculated. In particular, the results suggest that the variables Age, Gender and City_Category determine the purchasing behavior of customers in a store. Furthermore, the project shows that the machine learning techniques are relatively close to each other in their performance, but the best RMSE values are provided by the ensemble methods and the Gradient Boosting Machine method, both in the approach with all variables and in the one with the selected variables.
+
+This project has some limitations that point to interesting avenues for future research and modelling endeavors. The project does not consider an analysis of product-related variables for the reasons already described. One possibility, for example, would be to deepen the analysis at the product level. If more information is available on the product categories, this may provide further insights into customer purchasing behavior. Although several machine learning techniques are used, no method can really stand out significantly. From a methodical perspective, future modeling efforts can leverage other machine learning techniques, compute other ensemble models, or even use more complex approaches from the deep learning repertoire such as neural networks.
+
+The analyzes carried out are certainly only a starting point for really understanding customer purchasing behavior. However, the results of this project will hopefully help retailers to better tailor their products and services to their customer needs, taking into account certain characteristics such as age, gender or place of residence.
+
+# References
+Robert Nisbet, Gary Miner and Ken Yale (2018): Handbook of Statistical Analysis and Data Mining Applications
+
+https://github.com/mistrenge/BlackFriday.git
+
